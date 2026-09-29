@@ -31,6 +31,36 @@ class SequenceError(RubberCureError):
     """硫化、开模、调度或停运顺序被破坏。"""
 
 
+class SequenceBlocked(SequenceError):
+    """顺序闸口在动作执行前拦下非法下一步。
+
+    与事后自查不同，抛出时设备动作尚未发生。``recover`` 携带两条可执行的
+    合规路径：前向补齐缺失前置步骤，或安全退回到已知合规相位，现场不再
+    需要自己猜"该怎么退回去"。
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        component: str = "sequence",
+        attempted: str = "",
+        missing: list[str] | None = None,
+        recover: dict | None = None,
+    ) -> None:
+        super().__init__(message, component=component)
+        self.attempted = attempted
+        self.missing = list(missing or [])
+        self.recover = dict(recover or {})
+
+    def as_record(self) -> dict:
+        record = super().as_record()
+        record["attempted_step"] = self.attempted
+        record["missing_steps"] = list(self.missing)
+        record["recover"] = dict(self.recover)
+        return record
+
+
 class InterlockError(RubberCureError):
     """联锁条件不满足，动作被拒绝。"""
 

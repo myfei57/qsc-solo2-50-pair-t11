@@ -3,7 +3,8 @@
 调度顺序固定为：完成上报、顺序确认、下一模分配、写审计。完成上报来自各台
 硫化机，顺序确认把并发上报排成可复现顺序，再据此挑空闲机位分配下一模，
 最后把这次派工写进审计。顺序确认必须先于分配，否则下一模会跟着线程调度
-随机挑机。
+随机挑机。每个动作执行前先过顺序闸口，顺序不对当场拦下，并给出前向补齐
+路径（重跑被跳过的调度步骤），而不是派完工才事后记一笔。
 """
 
 from __future__ import annotations
@@ -40,7 +41,7 @@ class DispatchSequence:
     recorder: SequenceRecorder = field(init=False)
 
     def __post_init__(self) -> None:
-        self.recorder = SequenceRecorder(self.bus, "dispatch")
+        self.recorder = SequenceRecorder(self.bus, "dispatch", DISPATCH_ORDER)
 
     def run(self) -> dict:
         """按调度顺序执行，返回执行报告。"""
@@ -52,6 +53,7 @@ class DispatchSequence:
         product_code = str(timer.get("product_code") or "")
         generation = int(timer.get("curve_generation") or 0)
 
+        self.recorder.require("completion_report")
         report = self.scheduler.record_report(
             press.press_id,
             mold_id,
@@ -67,6 +69,7 @@ class DispatchSequence:
             sequence=report.sequence,
         )
 
+        self.recorder.require("order_confirm")
         ordered = order_completions(
             self.scheduler.recent_reports(),
             self.scheduler.limits.dispatch_window_s,
@@ -75,6 +78,7 @@ class DispatchSequence:
             "order_confirm", "batch", confirmed=len(ordered), window_s=self.scheduler.limits.dispatch_window_s
         )
 
+        self.recorder.require("mold_assigned")
         assignment = schedule_next(
             self.scheduler,
             self.fleet,
@@ -102,6 +106,7 @@ class DispatchSequence:
                 assigned=(assignment.as_dict() if assignment else None),
             )
         )
+        self.recorder.require("audit_note")
         self.recorder.note("audit_note", "audit", mold_id=mold_id)
         return self.report(mold_id, assignment)
 

@@ -101,7 +101,7 @@ class ConsoleAPI:
                 ),
             }
         except RubberCureError as error:
-            return {"ok": False, "error": self.platform.note_error(error)}
+            return {"ok": False, "error": self._note(error)}
 
     def open_mold(self, payload: dict) -> dict:
         try:
@@ -110,7 +110,7 @@ class ConsoleAPI:
                 "report": self.platform.run_open(str(payload.get("press_id", "press-01"))),
             }
         except RubberCureError as error:
-            return {"ok": False, "error": self.platform.note_error(error)}
+            return {"ok": False, "error": self._note(error)}
 
     def dispatch(self, payload: dict) -> dict:
         try:
@@ -119,7 +119,7 @@ class ConsoleAPI:
                 "report": self.platform.run_dispatch(str(payload.get("press_id", "press-01"))),
             }
         except RubberCureError as error:
-            return {"ok": False, "error": self.platform.note_error(error)}
+            return {"ok": False, "error": self._note(error)}
 
     def stop(self, payload: dict) -> dict:
         try:
@@ -128,7 +128,53 @@ class ConsoleAPI:
                 "report": self.platform.run_stop(str(payload.get("press_id", "press-01"))),
             }
         except RubberCureError as error:
-            return {"ok": False, "error": self.platform.note_error(error)}
+            return {"ok": False, "error": self._note(error)}
+
+    def recovery_plan(self, payload: dict) -> dict:
+        """返回某台硫化机退回合规状态的计划（只读，不执行动作）。"""
+
+        try:
+            return {
+                "ok": True,
+                "plan": self.platform.recovery_plan(str(payload.get("press_id", "press-01"))),
+            }
+        except RubberCureError as error:
+            return {"ok": False, "error": self._note(error)}
+
+    def recovery_run(self, payload: dict) -> dict:
+        """执行安全退回，把半程硫化机沿联锁路径退回待机。"""
+
+        try:
+            return {
+                "ok": True,
+                "recovery": self.platform.run_recovery(str(payload.get("press_id", "press-01"))),
+            }
+        except RubberCureError as error:
+            return {"ok": False, "error": self._note(error)}
+
+    def finish_forward(self, payload: dict) -> dict:
+        """已进硫化计时的硫化机：补齐计时并给出后续开模出路。"""
+
+        advance = payload.get("advance_s")
+        try:
+            return {
+                "ok": True,
+                "finish": self.platform.finish_forward(
+                    str(payload.get("press_id", "press-01")),
+                    advance_s=float(advance) if advance is not None else None,
+                ),
+            }
+        except RubberCureError as error:
+            return {"ok": False, "error": self._note(error)}
+
+    def _note(self, error: RubberCureError) -> dict:
+        """落盘异常，并把恢复路径随接口返回，现场不用再去翻日志。"""
+
+        record = dict(self.platform.note_error(error))
+        recovery = error.as_record().get("recover")
+        if recovery:
+            record["recover"] = recovery
+        return record
 
     def step(self, payload: dict) -> dict:
         """推进一个机群控制周期。"""
@@ -143,7 +189,7 @@ class ConsoleAPI:
         try:
             return {"ok": True, "cycle": self.platform.cycle(inputs)}
         except RubberCureError as error:
-            return {"ok": False, "error": self.platform.note_error(error)}
+            return {"ok": False, "error": self._note(error)}
 
     def enqueue(self, payload: dict) -> dict:
         mold_id = str(payload.get("mold_id", "mold-01"))
@@ -157,7 +203,7 @@ class ConsoleAPI:
                 ),
             }
         except RubberCureError as error:
-            return {"ok": False, "error": self.platform.note_error(error)}
+            return {"ok": False, "error": self._note(error)}
 
     def remap(self, payload: dict) -> dict:
         """重新登记传感器映射。"""
@@ -169,7 +215,7 @@ class ConsoleAPI:
             return {"ok": True, "mapping": self.platform.remap_sensor(mold_id, sensors)}
         except (RubberCureError, ValueError) as error:
             if isinstance(error, RubberCureError):
-                return {"ok": False, "error": self.platform.note_error(error)}
+                return {"ok": False, "error": self._note(error)}
             return {"ok": False, "error": {"type": "ValueError", "message": str(error)}}
 
     def retire(self, payload: dict) -> dict:
@@ -180,7 +226,7 @@ class ConsoleAPI:
         try:
             return {"ok": True, "mold": self.platform.retire_mold(mold_id, reason)}
         except RubberCureError as error:
-            return {"ok": False, "error": self.platform.note_error(error)}
+            return {"ok": False, "error": self._note(error)}
 
 
 def summarize_count(platform: Platform) -> dict:

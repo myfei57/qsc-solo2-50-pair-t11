@@ -30,6 +30,7 @@ from .press.summary import summarize_fleet
 from .sequence.cure import CureRunPlan, CureSequence
 from .sequence.dispatch import DispatchSequence
 from .sequence.openmold import OpenSequence
+from .sequence.recovery import RecoveryPlanner
 from .sequence.selfcheck import verify_topology
 from .sequence.stop import StopSequence
 from .store.journal import JsonlJournal
@@ -244,6 +245,7 @@ class Platform:
                 maps=self.maps,
                 curves=self.curves,
                 press=self.press(press_id),
+                latch=self.latch,
             )
             report = sequence.run(plan)
             report["topology_missing"] = sequence.verify_topology(self.topology)
@@ -283,6 +285,30 @@ class Platform:
                 clock=self.clock, bus=self.bus, press=self.press(press_id)
             )
             return sequence.run()
+
+    def recovery_plan(self, press_id: str = DEFAULT_PRESS_ID) -> dict:
+        """按硫化机当前真实相位给出退回合规状态的计划（不执行动作）。"""
+
+        with self._lock:
+            return RecoveryPlanner(self.press(press_id), self.clock, self.bus, self.latch).plan()
+
+    def run_recovery(self, press_id: str = DEFAULT_PRESS_ID) -> dict:
+        """执行安全退回，把半程硫化机沿联锁路径退回待机。"""
+
+        with self._lock:
+            result = RecoveryPlanner(
+                self.press(press_id), self.clock, self.bus, self.latch
+            ).execute_retreat()
+            result["phase_after"] = self.press(press_id).phase.value
+            return result
+
+    def finish_forward(self, press_id: str = DEFAULT_PRESS_ID, advance_s: float | None = None) -> dict:
+        """已进硫化计时的硫化机不能倒退：补齐计时，给出后续开模出路。"""
+
+        with self._lock:
+            return RecoveryPlanner(
+                self.press(press_id), self.clock, self.bus, self.latch
+            ).finish_forward(advance_s=advance_s)
 
     def cycle(self, inputs: CycleInputs) -> dict:
         """推进一个机群控制周期，返回本周期摘要。"""
@@ -417,17 +443,27 @@ class Platform:
         }
 
     def note_error(self, error: RubberCureError) -> dict:
-        """把平台异常写入审计，返回落盘记录。"""
+        """把平台异常写入审计，返回落盘记录。
+
+        顺序闸口拦截属于必须立即处置的现场事件，按告警级别落盘，并把异常
+        携带的前向补齐／安全退回路径一并写进明细，复盘时能直接看到回路。
+        """
 
         payload = error.as_record()
+        blocked = payload.get("type") == "SequenceBlocked"
+        detail: dict = {"message": payload["message"]}
+        if blocked:
+            detail["attempted_step"] = payload.get("attempted_step", "")
+            detail["missing_steps"] = payload.get("missing_steps", [])
+            detail["recover"] = payload.get("recover", {})
         record = self.audit.record(
             AuditRecord.create(
                 self.clock.now(),
                 payload["component"],
                 "error",
                 payload["type"],
-                severity="warning",
-                message=payload["message"],
+                severity="alarm" if blocked else "warning",
+                **detail,
             )
         )
         return record.as_dict()
@@ -491,6 +527,9 @@ class Platform:
                 "/api/open",
                 "/api/dispatch",
                 "/api/stop",
+                "/api/recovery/plan",
+                "/api/recovery/run",
+                "/api/recovery/finish",
                 "/api/step",
                 "/api/enqueue",
                 "/api/remap",

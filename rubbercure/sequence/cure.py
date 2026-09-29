@@ -1,9 +1,12 @@
 """硫化顺序。
 
 硫化顺序按设计文档固定为：模具登记、传感器映射登记、合模前排气、合模锁模、
-通汽升温、模温确认落盘、启动硫化计时。每一步都发事件，运行完成后按记录
-自查：任何一步提前（例如没排气就合模、没落盘确认就计时）都会被
-``verify_order`` 指出来。
+通汽升温、模温确认落盘、启动硫化计时。每一步都发事件，且设备动作执行前
+先过顺序闸口：任何一步提前（例如没排气就合模、没落盘确认就计时）都会被
+:class:`~rubbercure.sequence.selfcheck.SequenceGuard` 在动作发生前拦下，
+抛出 :class:`~rubbercure.errors.SequenceBlocked`，机器不会继续往下走，
+异常里同时带前向补齐路径与可执行的安全退回路径。运行完成后仍按记录做一次
+自查，作为第二道防线。
 """
 
 from __future__ import annotations
@@ -21,7 +24,9 @@ from ..press.press import CuringPress
 from ..press.transitions import PressPhase
 from ..temp.read import read_mold_temp
 from ..timer.curve import CurveBook
+from ..timer.latch import CureLatch
 from ..timer.start import start_cure
+from .recovery import RecoveryPlanner
 from .selfcheck import SequenceRecorder, verify_order, verify_topology
 
 CURE_ORDER: tuple[tuple[str, str, str], ...] = (
@@ -68,11 +73,23 @@ class CureSequence:
     maps: SensorMapBook
     curves: CurveBook
     press: CuringPress
+    latch: CureLatch
     last_confirmation: dict = field(default_factory=dict)
     recorder: SequenceRecorder = field(init=False)
 
     def __post_init__(self) -> None:
-        self.recorder = SequenceRecorder(self.bus, "cure")
+        self.recorder = SequenceRecorder(
+            self.bus,
+            "cure",
+            CURE_ORDER,
+            recovery=self._build_recovery,
+        )
+
+    def _build_recovery(self, attempted: str, missing: list[str]) -> dict:
+        """闸口拦下时，按硫化机真实相位给一条可执行的安全退回路径。"""
+
+        planner = RecoveryPlanner(self.press, self.clock, self.bus, self.latch)
+        return planner.plan()
 
     def run(self, plan: CureRunPlan) -> dict:
         """按硫化顺序执行，返回执行报告。"""
@@ -81,6 +98,7 @@ class CureSequence:
         press = self.press
         now = self.clock.now()
 
+        self.recorder.require("mold_registered")
         record = self.registry.register(
             plan.mold_id, plan.product_code, plan.cavity_count, now
         )
@@ -88,6 +106,7 @@ class CureSequence:
             "mold_registered", "mold", mold_id=plan.mold_id, generation=record.generation
         )
 
+        self.recorder.require("mapping_registered")
         mapping = self.maps.register(plan.mold_id, plan.sensors, now)
         self.recorder.note(
             "mapping_registered", "mold", mold_id=plan.mold_id, generation=mapping.generation
@@ -98,11 +117,13 @@ class CureSequence:
             plan.mold_id, plan.thickness_mm, self.registry, self.curves
         )
 
+        self.recorder.require("cavity_purge")
         purge = press.steam.purge_cavity(plan.mold_id, generation=mapping.generation)
         self.recorder.note(
             "cavity_purge", "steam", mold_id=plan.mold_id, hold_s=round(purge.hold_s, 3)
         )
 
+        self.recorder.require("lift_close")
         press.transition(PressPhase.CLAMPING)
         closed = close_mold(
             press.lift,
@@ -116,6 +137,7 @@ class CureSequence:
             "lift_close", "lift", mold_id=plan.mold_id, clamp_force_kn=closed["clamp_force_kn"]
         )
 
+        self.recorder.require("steam_open")
         press.transition(PressPhase.HEATING)
         steam = press.steam.open_steam(plan.target_kpa)
         self.recorder.note(
@@ -133,6 +155,7 @@ class CureSequence:
             plan.raw_readings,
             self.clock.now(),
         )
+        self.recorder.require("temp_confirm")
         confirmation = press.temp_loop.confirm(reading, plan.temp_hold_s)
         self.recorder.note(
             "temp_confirm",
@@ -143,6 +166,7 @@ class CureSequence:
         )
         self.last_confirmation = confirmation.as_dict()
 
+        self.recorder.require("timer_start")
         press.lift.require_closed()
         press.timer.set_clock_now(self.clock.now())
         started = start_cure(

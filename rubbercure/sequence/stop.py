@@ -1,8 +1,9 @@
 """停运顺序。
 
 停运顺序固定为：停主蒸汽阀、放残压、排冷却水、停冷却循环。先停汽再停冷却
-是硬约束：带着蒸汽停冷却会让模具局部骤冷、产生内应力。顺序自查会把任何
-提前停冷却的操作直接指出来。
+是硬约束：带着蒸汽停冷却会让模具局部骤冷、产生内应力。每个动作执行前先过
+顺序闸口，任何提前停冷却的操作都会在设备动作前被直接拦下，并给出前向
+补齐路径，而不是等走完再记账。
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ class StopSequence:
     recorder: SequenceRecorder = field(init=False)
 
     def __post_init__(self) -> None:
-        self.recorder = SequenceRecorder(self.bus, "stop")
+        self.recorder = SequenceRecorder(self.bus, "stop", STOP_ORDER)
 
     def run(self) -> dict:
         """按停运顺序执行，返回执行报告。"""
@@ -42,21 +43,25 @@ class StopSequence:
         press = self.press
         mold_id = press.mold_id or press.press_id
 
+        self.recorder.require("steam_stop")
         closed = press.steam.close_steam()
         self.recorder.note(
             "steam_stop", "steam", mold_id=mold_id, valve_opening_pct=closed["valve_opening_pct"]
         )
 
+        self.recorder.require("steam_vent")
         vent = press.steam.vent_pressure(mold_id)
         self.recorder.note(
             "steam_vent", "steam", mold_id=mold_id, residual_kpa=round(vent.residual_kpa, 3)
         )
 
+        self.recorder.require("coolant_drain")
         drained = press.cooling.drain()
         self.recorder.note(
             "coolant_drain", "cool", mold_id=mold_id, residual_m3=drained["residual_m3"]
         )
 
+        self.recorder.require("cool_stop")
         stopped = stop_cooling(press.cooling, press.steam, self.bus)
         self.recorder.note("cool_stop", "cool", mold_id=mold_id, flow_m3_h=stopped["flow_m3_h"])
 
