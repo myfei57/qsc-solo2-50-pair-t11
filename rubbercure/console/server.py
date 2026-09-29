@@ -104,6 +104,12 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(self.api.dispatch(self._read_json()))
             elif parsed.path == "/api/stop":
                 self._send_json(self.api.stop(self._read_json()))
+            elif parsed.path == "/api/advance":
+                self._send_json(self.api.advance(self._read_json()))
+            elif parsed.path == "/api/recover":
+                self._send_json(self.api.recover(self._read_json()))
+            elif parsed.path == "/api/blockage":
+                self._send_json(self.api.blockage(self._read_json()))
             elif parsed.path == "/api/step":
                 self._send_json(self.api.step(self._read_json()))
             elif parsed.path == "/api/enqueue":

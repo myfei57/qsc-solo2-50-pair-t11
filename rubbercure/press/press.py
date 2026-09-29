@@ -76,6 +76,11 @@ class CuringPress:
     def transition(self, target: PressPhase) -> PressPhase:
         return self._state.transition(target)
 
+    def rollback_phase(self) -> PressPhase:
+        """硫化机相位沿正常迁移边反向退一格（顺序闸门退回用）。"""
+
+        return self._state.rollback()
+
     def load_mold(self, mold_id: str) -> dict:
         """装模：把模具挂到本机。"""
 
@@ -90,6 +95,52 @@ class CuringPress:
     def clear_mold(self) -> None:
         with self._lock:
             self._mold_id = None
+
+    def restore_mold(self, mold_id: str) -> None:
+        """撤回取件：把模具重新挂回本机（顺序闸门退回用）。"""
+
+        with self._lock:
+            self._mold_id = mold_id
+
+    def abort_loaded_mold(self) -> dict:
+        """撤回装模：相位退回待机并摘下在机模具。"""
+
+        with self._lock:
+            self._state.rollback()
+            mold_id = self._mold_id
+            self._mold_id = None
+        self.bus.publish(
+            Event.of("press", "press", "mold_load_aborted", subject=mold_id or self.press_id,
+                     press_id=self.press_id)
+        )
+        return {"press_id": self.press_id, "mold_id": mold_id, "phase": self._state.phase.value}
+
+    def reopen_after_close(self, mold_id: str) -> dict:
+        """撤回合模：重新开模并把相位退回装模完成。"""
+
+        with self._lock:
+            self.lift.open_clamp(mold_id)
+            self._state.rollback()
+            phase = self._state.phase.value
+        return {"press_id": self.press_id, "mold_id": mold_id, "phase": phase}
+
+    def abort_heating(self) -> dict:
+        """撤回升温：关主蒸汽阀与疏水阀，相位退回合模。"""
+
+        with self._lock:
+            closed = self.steam.close_steam()
+            self._state.rollback()
+            phase = self._state.phase.value
+        return {"press_id": self.press_id, "phase": phase, "steam": closed}
+
+    def abort_curing(self, mold_id: str) -> dict:
+        """撤回计时启动：复位硫化计时并把相位退回升温。"""
+
+        with self._lock:
+            timer = self.timer.abort(mold_id)
+            self._state.rollback()
+        return {"press_id": self.press_id, "mold_id": mold_id, "timer": timer,
+                "phase": self._state.phase.value}
 
     def require_mold(self) -> str:
         """返回在机模具；没有则报错。"""

@@ -170,6 +170,24 @@ class CureTimer:
         )
         return {"mold_id": mold_id, "phase": self._state.phase.value}
 
+    def abort(self, mold_id: str) -> dict:
+        """顺序闸门撤回计时启动：从计时相位直接退回空闲。"""
+
+        with self._lock:
+            if self._mold_id is not None and self._mold_id != mold_id:
+                raise CureError(
+                    f"中止对象 {mold_id} 与当前模次 {self._mold_id} 不一致", component="timer"
+                )
+            self._state.transition(TimerPhase.IDLE)
+            self._mold_id = None
+            self._planned_s = 0.0
+            self._elapsed_s = 0.0
+            self._samples = []
+        self._bus.publish(
+            Event.of("timer", "timer", "cure_aborted", subject=mold_id, severity="warning")
+        )
+        return {"mold_id": mold_id, "phase": self._state.phase.value}
+
     def persist_state(self) -> str:
         """把计时相位与进度落盘，返回内容摘要。"""
 

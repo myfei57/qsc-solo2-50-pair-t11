@@ -29,6 +29,7 @@ from .press.fleet import PressFleet
 from .press.summary import summarize_fleet
 from .sequence.cure import CureRunPlan, CureSequence
 from .sequence.dispatch import DispatchSequence
+from .sequence.guard import SequenceBlocked
 from .sequence.openmold import OpenSequence
 from .sequence.selfcheck import verify_topology
 from .sequence.stop import StopSequence
@@ -93,6 +94,7 @@ class Platform:
 
         self._cycles = 0
         self._lock = threading.RLock()
+        self._runners: dict[tuple[str, str], object] = {}
         self._register_namespaces()
 
     def _seed_reference_curve(self) -> None:
@@ -219,12 +221,19 @@ class Platform:
             cavity_count=cavity_count,
             sensors=sensors,
         )
+        plan = self._build_cure_plan(mold_id, cavity_count, thickness, registered)
+        with self._lock:
+            sequence = self._cure_runner(press_id)
+            sequence.prepare(plan)
+            return self._drive_sequence(sequence, plan, press_id, kind="cure")
+
+    def _build_cure_plan(self, mold_id: str, cavity_count: int, thickness: float, registered: dict) -> CureRunPlan:
         mapping = self.maps.latest_for(mold_id)
         readings = {
             sensor: self.config.temp.setpoint_c + (cavity - 1.5) * 0.4
             for cavity, sensor in mapping.sensors
         }
-        plan = CureRunPlan(
+        return CureRunPlan(
             mold_id=mold_id,
             product_code=registered["mold"]["product_code"],
             cavity_count=cavity_count,
@@ -235,8 +244,92 @@ class Platform:
             warmup_start_c=REFERENCE_TEMPERATURE_C,
             temp_hold_s=self.config.temp.confirm_hold_s,
         )
+
+    def advance_cure(
+        self,
+        step: str,
+        mold_id: str = "mold-01",
+        press_id: str = DEFAULT_PRESS_ID,
+        cavity_count: int = 4,
+    ) -> dict:
+        """单步驱动硫化顺序；顺序不对当场拦截，返回拦截与退回方案。
+
+        第一步会懒登记模具并装入默认计划；之后按步骤名单步推进。
+        """
+
         with self._lock:
-            sequence = CureSequence(
+            runner = self._cure_runner(press_id)
+            if runner.plan is None:
+                thickness = self.config.press.default_thickness_mm
+                registered = self.register_mold(mold_id, cavity_count=cavity_count)
+                runner.prepare(self._build_cure_plan(mold_id, cavity_count, thickness, registered))
+            return self._step_runner("cure", press_id, step, runner)
+
+    def advance_open(self, step: str, press_id: str = DEFAULT_PRESS_ID) -> dict:
+        """单步驱动开模顺序；顺序不对当场拦截。"""
+
+        with self._lock:
+            return self._step_runner("openmold", press_id, step)
+
+    def advance_dispatch(self, step: str, press_id: str = DEFAULT_PRESS_ID) -> dict:
+        """单步驱动调度顺序；顺序不对当场拦截。"""
+
+        with self._lock:
+            return self._step_runner("dispatch", press_id, step)
+
+    def advance_stop(self, step: str, press_id: str = DEFAULT_PRESS_ID) -> dict:
+        """单步驱动停运顺序；顺序不对当场拦截。"""
+
+        with self._lock:
+            return self._step_runner("stop", press_id, step)
+
+    def _step_runner(self, kind: str, press_id: str, step: str, runner=None) -> dict:
+        runner = runner or self._sequence_runner(kind, press_id)
+        try:
+            runner.advance(step)
+        except SequenceBlocked as blocked:
+            runner.note_blocked(blocked)
+            self.note_error(blocked)
+            raise
+        return {
+            "kind": kind,
+            "press_id": press_id,
+            "step": step,
+            "executed": runner.guard.executed(),
+            "blocked": False,
+        }
+
+    def recover_sequence(self, kind: str, press_id: str = DEFAULT_PRESS_ID) -> dict:
+        """把被拦的顺序退回合规检查点，补齐缺失步后重试被拦动作。"""
+
+        with self._lock:
+            runner = self._runners.get((press_id, kind))
+            if runner is None or runner.blocked is None:
+                raise RubberCureError(
+                    f"{press_id} 的 {kind} 顺序当前没有被拦截的动作", component="sequence"
+                )
+            return runner.recover()
+
+    def sequence_blockage(self, kind: str, press_id: str = DEFAULT_PRESS_ID) -> dict | None:
+        """返回某台机某条顺序当前的拦截与退回方案（无拦截返回 None）。"""
+
+        with self._lock:
+            runner = self._runners.get((press_id, kind))
+            if runner is None or runner.blocked is None:
+                return None
+            plan = runner.blocked.plan
+            return {
+                "press_id": press_id,
+                "kind": kind,
+                "message": runner.blocked.message,
+                "executed": runner.guard.executed(),
+                "recovery": plan.as_dict(),
+            }
+
+    def _cure_runner(self, press_id: str) -> CureSequence:
+        runner = self._runners.get((press_id, "cure"))
+        if runner is None:
+            runner = CureSequence(
                 clock=self.clock,
                 bus=self.bus,
                 config=self.config,
@@ -245,27 +338,19 @@ class Platform:
                 curves=self.curves,
                 press=self.press(press_id),
             )
-            report = sequence.run(plan)
-            report["topology_missing"] = sequence.verify_topology(self.topology)
-            return report
+            self._runners[(press_id, "cure")] = runner
+        return runner
 
-    def run_open(self, press_id: str = DEFAULT_PRESS_ID) -> dict:
-        """在一台硫化机上跑完整的开模顺序。"""
-
-        with self._lock:
-            sequence = OpenSequence(
-                clock=self.clock,
-                bus=self.bus,
-                latch=self.latch,
-                press=self.press(press_id),
+    def _sequence_runner(self, kind: str, press_id: str):
+        cached = self._runners.get((press_id, kind))
+        if cached is not None:
+            return cached
+        if kind == "openmold":
+            runner: object = OpenSequence(
+                clock=self.clock, bus=self.bus, latch=self.latch, press=self.press(press_id)
             )
-            return sequence.run()
-
-    def run_dispatch(self, press_id: str = DEFAULT_PRESS_ID) -> dict:
-        """在一台硫化机上跑一次机群调度顺序。"""
-
-        with self._lock:
-            sequence = DispatchSequence(
+        elif kind == "dispatch":
+            runner = DispatchSequence(
                 clock=self.clock,
                 bus=self.bus,
                 registry=self.registry,
@@ -273,16 +358,63 @@ class Platform:
                 fleet=self.fleet,
                 press=self.press(press_id),
             )
-            return sequence.run()
+        elif kind == "stop":
+            runner = StopSequence(clock=self.clock, bus=self.bus, press=self.press(press_id))
+        else:
+            raise RubberCureError(f"未知工艺顺序: {kind}", component="sequence")
+        self._runners[(press_id, kind)] = runner
+        return runner
+
+    def _drive_sequence(self, sequence, plan, press_id: str, *, kind: str) -> dict:
+        """把一条顺序从头跑到尾；任一步被拦时登记拦截并向上抛出。"""
+
+        try:
+            for step in sequence.guard.order:
+                sequence.advance(step)
+        except SequenceBlocked as blocked:
+            sequence.note_blocked(blocked)
+            self.note_error(blocked)
+            raise
+        if kind == "cure":
+            report = sequence.report(plan)
+        else:  # pragma: no cover - 当前只有硫化走这个入口
+            report = sequence.report()
+        report["topology_missing"] = sequence.verify_topology(self.topology)
+        return report
+
+    def run_open(self, press_id: str = DEFAULT_PRESS_ID) -> dict:
+        """在一台硫化机上跑完整的开模顺序。"""
+
+        with self._lock:
+            return self._run_full_sequence("openmold", press_id)
+
+    def run_dispatch(self, press_id: str = DEFAULT_PRESS_ID) -> dict:
+        """在一台硫化机上跑一次机群调度顺序。"""
+
+        with self._lock:
+            return self._run_full_sequence("dispatch", press_id)
 
     def run_stop(self, press_id: str = DEFAULT_PRESS_ID) -> dict:
         """在一台硫化机上跑停运顺序。"""
 
         with self._lock:
-            sequence = StopSequence(
-                clock=self.clock, bus=self.bus, press=self.press(press_id)
-            )
-            return sequence.run()
+            return self._run_full_sequence("stop", press_id)
+
+    def _run_full_sequence(self, kind: str, press_id: str) -> dict:
+        """把开模／调度／停运顺序从头跑到尾，任一步被拦即登记并抛出。"""
+
+        runner = self._sequence_runner(kind, press_id)
+        runner.prepare()
+        try:
+            for step in runner.guard.order:
+                runner.advance(step)
+        except SequenceBlocked as blocked:
+            runner.note_blocked(blocked)
+            self.note_error(blocked)
+            raise
+        mold_id = runner._mold_id if kind != "dispatch" else runner._mold_id
+        assignment = getattr(runner, "_assignment", None)
+        return runner.report(mold_id, assignment) if kind == "dispatch" else runner.report(mold_id)
 
     def cycle(self, inputs: CycleInputs) -> dict:
         """推进一个机群控制周期，返回本周期摘要。"""
@@ -420,6 +552,11 @@ class Platform:
         """把平台异常写入审计，返回落盘记录。"""
 
         payload = error.as_record()
+        detail = {"message": payload["message"]}
+        # 顺序拦截额外落退回方案，复盘时能直接看到"当时被拦在哪、怎么退"。
+        recovery = payload.get("recovery")
+        if recovery:
+            detail["recovery"] = recovery
         record = self.audit.record(
             AuditRecord.create(
                 self.clock.now(),
@@ -427,7 +564,7 @@ class Platform:
                 "error",
                 payload["type"],
                 severity="warning",
-                message=payload["message"],
+                **detail,
             )
         )
         return record.as_dict()
@@ -491,6 +628,9 @@ class Platform:
                 "/api/open",
                 "/api/dispatch",
                 "/api/stop",
+                "/api/advance",
+                "/api/recover",
+                "/api/blockage",
                 "/api/step",
                 "/api/enqueue",
                 "/api/remap",

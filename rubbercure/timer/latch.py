@@ -71,6 +71,14 @@ class CureLatch:
             entry = self._entries.get(mold_id)
         return entry is not None and not entry.released
 
+    def revoke(self, mold_id: str) -> bool:
+        """撤回指定模具的完成闩锁（顺序闸门退回用），返回是否真有闩锁可撤。"""
+
+        with self._lock:
+            existed = mold_id in self._entries
+            self._entries.pop(mold_id, None)
+        return existed
+
     def set_molds(self) -> list[str]:
         """返回当前所有已置位未复位的模具。"""
 

@@ -41,6 +41,19 @@ class PressStateMachine:
         PressPhase.DONE: (PressPhase.IDLE,),
     }
 
+    # 顺序闸门退回合规检查点时使用的回退迁移：只沿正常迁移边反向退一格，
+    # 表示"这一步的物理动作撤回"，不允许跨越多个相位。泄压（VENTING）的
+    # 前一相位是硫化保温（CURING），开模则由 VENTING 正向进入 OPENING。
+    _RECOVERY = {
+        PressPhase.CURING: PressPhase.HEATING,
+        PressPhase.HEATING: PressPhase.CLAMPING,
+        PressPhase.CLAMPING: PressPhase.MOLD_LOADED,
+        PressPhase.MOLD_LOADED: PressPhase.IDLE,
+        PressPhase.OPENING: PressPhase.VENTING,
+        PressPhase.VENTING: PressPhase.CURING,
+        PressPhase.COOLING: PressPhase.CURING,
+    }
+
     def __init__(self) -> None:
         self._phase = PressPhase.IDLE
         self._history: list[PressPhase] = [PressPhase.IDLE]
@@ -55,6 +68,19 @@ class PressStateMachine:
         if target not in self._ALLOWED[self._phase]:
             raise SequenceError(
                 f"硫化机不允许从 {self._phase.value} 迁移到 {target.value}",
+                component=component,
+            )
+        self._phase = target
+        self._history.append(target)
+        return self._phase
+
+    def rollback(self, component: str = "press") -> PressPhase:
+        """沿正常迁移边反向退一格，供顺序闸门撤回越序步。"""
+
+        target = self._RECOVERY.get(self._phase)
+        if target is None:
+            raise SequenceError(
+                f"硫化机相位 {self._phase.value} 没有可退回的上一相位",
                 component=component,
             )
         self._phase = target

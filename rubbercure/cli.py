@@ -24,13 +24,25 @@ from .console.server import ConsoleServer, probe_pages
 from .errors import RubberCureError
 
 DEFAULT_DEMO_CYCLES = 12
+_PLATFORM_CACHE: dict = {}
 
 
 def _build(args: argparse.Namespace) -> Platform:
-    config = load_config(args.config) if getattr(args, "config", None) else default_config()
-    if getattr(args, "storage_root", None):
-        return build_platform(config, storage_root=args.storage_root)
-    return Platform(config=config)
+    # 单步驱动（advance/blockage/recover）需要保留顺序闸门的内存步骤记录：
+    # 同一进程内按存储根缓存平台，使连续命令在同一条顺序上推进。
+    config_path = getattr(args, "config", None)
+    storage_root = getattr(args, "storage_root", None)
+    key = storage_root or f"<default-config:{config_path}>"
+    cached = _PLATFORM_CACHE.get(key)
+    if cached is not None:
+        return cached
+    config = load_config(config_path) if config_path else default_config()
+    if storage_root:
+        effective = build_platform(config, storage_root=storage_root)
+    else:
+        effective = Platform(config=config)
+    _PLATFORM_CACHE[key] = effective
+    return effective
 
 
 def _dump(payload: object) -> None:
@@ -113,6 +125,53 @@ def _cmd_demo(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_advance(args: argparse.Namespace) -> int:
+    """单步驱动一条工艺顺序；被拦时打印退回方案，不继续往下走。"""
+
+    platform = _build(args)
+    try:
+        if args.kind == "cure":
+            result = platform.advance_cure(
+                args.step, mold_id=args.mold_id, press_id=args.press_id,
+                cavity_count=args.cavity_count,
+            )
+        elif args.kind == "openmold":
+            result = platform.advance_open(args.step, args.press_id)
+        elif args.kind == "dispatch":
+            result = platform.advance_dispatch(args.step, args.press_id)
+        else:
+            result = platform.advance_stop(args.step, args.press_id)
+        _dump({"ok": True, "result": result})
+        return 0
+    except Exception as error:  # SequenceBlocked 也带结构化退回方案
+        payload = getattr(error, "as_record", lambda: {"message": str(error)})()
+        plan = getattr(error, "plan", None)
+        if plan is not None and plan.blocked_step:
+            payload["recovery"] = plan.as_dict()
+        _dump({"ok": False, "blocked": True, "error": payload})
+        return 3
+
+
+def _cmd_recover(args: argparse.Namespace) -> int:
+    """把被拦的顺序退回合规检查点，补齐缺失步后重试被拦动作。"""
+
+    platform = _build(args)
+    try:
+        result = platform.recover_sequence(args.kind, args.press_id)
+        _dump({"ok": True, "result": result})
+        return 0
+    except RubberCureError as error:
+        _dump({"ok": False, "error": error.as_record()})
+        return 2
+
+
+def _cmd_blockage(args: argparse.Namespace) -> int:
+    platform = _build(args)
+    blockage = platform.sequence_blockage(args.kind, args.press_id)
+    _dump({"blocked": blockage is not None, "blockage": blockage})
+    return 0
+
+
 def _cmd_status(args: argparse.Namespace) -> int:
     platform = _build(args)
     payload = platform.status()
@@ -161,6 +220,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     status = sub.add_parser("status", help="打印状态快照")
     status.set_defaults(func=_cmd_status)
+
+    advance = sub.add_parser("advance", help="单步驱动一条工艺顺序（顺序错当场拦住）")
+    advance.add_argument("--kind", choices=("cure", "openmold", "dispatch", "stop"), default="cure")
+    advance.add_argument("--step", required=True, help="要执行的工艺步骤名")
+    advance.add_argument("--press-id", default="press-01")
+    advance.add_argument("--mold-id", default="mold-01")
+    advance.add_argument("--cavity-count", type=int, default=4)
+    advance.set_defaults(func=_cmd_advance)
+
+    recover = sub.add_parser("recover", help="退回合规检查点并补齐后重试被拦动作")
+    recover.add_argument("--kind", choices=("cure", "openmold", "dispatch", "stop"), default="cure")
+    recover.add_argument("--press-id", default="press-01")
+    recover.set_defaults(func=_cmd_recover)
+
+    blockage = sub.add_parser("blockage", help="查看当前拦截与退回方案")
+    blockage.add_argument("--kind", choices=("cure", "openmold", "dispatch", "stop"), default="cure")
+    blockage.add_argument("--press-id", default="press-01")
+    blockage.set_defaults(func=_cmd_blockage)
 
     config = sub.add_parser("config", help="打印生效配置")
     config.set_defaults(func=_cmd_config)

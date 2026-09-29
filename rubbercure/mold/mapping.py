@@ -104,6 +104,18 @@ class SensorMapBook:
 
         return self.latest_for(mold_id).sensor_for(cavity)
 
+    def withdraw_latest(self, mold_id: str) -> SensorMapping:
+        """撤回该模具最近一代映射（顺序闸门退回用），返回被撤回的映射。"""
+
+        with self._lock:
+            history = self._by_mold.get(mold_id)
+            if not history:
+                raise MoldError(f"模具 {mold_id} 尚未登记传感器映射，无法撤回", component="mold")
+            withdrawn = history.pop()
+            if not history:
+                del self._by_mold[mold_id]
+        return withdrawn
+
     def known_molds(self) -> list[str]:
         with self._lock:
             return sorted(self._by_mold)

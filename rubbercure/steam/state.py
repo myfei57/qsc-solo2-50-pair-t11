@@ -33,6 +33,14 @@ class SteamStateMachine:
         SteamPhase.VENTING: (SteamPhase.IDLE, SteamPhase.PURGING),
     }
 
+    # 顺序闸门撤回越序步时沿正常迁移边反向退一格。
+    _RECOVERY = {
+        SteamPhase.PURGING: SteamPhase.IDLE,
+        SteamPhase.HEATING: SteamPhase.PURGING,
+        SteamPhase.VENTING: SteamPhase.PURGING,
+        SteamPhase.HOLDING: SteamPhase.HEATING,
+    }
+
     def __init__(self) -> None:
         self._phase = SteamPhase.IDLE
         self._history: list[SteamPhase] = [SteamPhase.IDLE]
@@ -47,6 +55,19 @@ class SteamStateMachine:
         if target not in self._ALLOWED[self._phase]:
             raise SequenceError(
                 f"蒸汽回路不允许从 {self._phase.value} 迁移到 {target.value}",
+                component=component,
+            )
+        self._phase = target
+        self._history.append(target)
+        return self._phase
+
+    def rollback(self, component: str = "steam") -> SteamPhase:
+        """沿正常迁移边反向退一格，供顺序闸门撤回越序步。"""
+
+        target = self._RECOVERY.get(self._phase)
+        if target is None:
+            raise SequenceError(
+                f"蒸汽回路相位 {self._phase.value} 没有可退回的上一相位",
                 component=component,
             )
         self._phase = target

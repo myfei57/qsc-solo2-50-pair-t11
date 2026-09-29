@@ -1,9 +1,13 @@
-"""顺序记录与自查。
+"""顺序记录与事后自查。
 
-四个顺序（硫化、开模、调度、停运）都共用同一套记录与自查：每执行一步就把
+四个顺序（硫化、开模、调度、停运）共用同一套记录与自查：每执行一步就把
 步骤名、组件与细节记进去并发布事件，运行完成后按内置的顺序规则逐条对照。
-顺序规则是显式的 (先, 后, 说明) 三元组，任何一步提前都会在自查结果里被
-指出，而不是靠注释约束约定。
+顺序规则是显式的 (先, 后, 说明) 三元组。
+
+注意这里的 :func:`verify_order` 是**事后复核**：用来对已经跑完的记录再核
+一遍、出报告。真正"顺序不对当场拦住、不让机器往下走"的动作期防线在
+:mod:`rubbercure.sequence.guard`，它在每一步物理动作之前授权，并在拦截时
+给出退回合规检查点的方案。两者共用同一组规则三元组，结论天然一致。
 """
 
 from __future__ import annotations
@@ -73,6 +77,26 @@ class SequenceRecorder:
 
     def clear(self) -> None:
         self._steps.clear()
+
+    def prune_to(self, executed: list[str]) -> list[OrderStep]:
+        """按当前实际已执行步骤裁剪记录，返回被撤掉的步骤（先发撤销事件）。"""
+
+        kept = set(executed)
+        removed = [record for record in self._steps if record.name not in kept]
+        for record in removed:
+            self._bus.publish(
+                Event.of(
+                    self._topic,
+                    self._component,
+                    f"{self._topic}_step_undone",
+                    subject=record.name,
+                    step_index=record.index,
+                    component_name=record.component,
+                    **record.detail,
+                )
+            )
+        self._steps = [record for record in self._steps if record.name in kept]
+        return removed
 
     def as_list(self) -> list[dict]:
         return [record.as_dict() for record in self._steps]

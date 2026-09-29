@@ -88,10 +88,55 @@ class BatchScheduler:
         return [report.as_dict() for report in order_completions(reports, window)]
 
     def recent_reports(self, limit: int = 20) -> list[CompletionReport]:
-        """返回最近的上报（保持原始记录，供排序与审计使用）。"""
+        """返回最近的上报（保持原始记录，供排序与后续使用）。"""
 
         with self.lock:
             return list(self._reports[-limit:])
+
+    def withdraw_last_report(self) -> CompletionReport | None:
+        """撤回最近一条完成上报（顺序闸门退回用）。"""
+
+        with self.lock:
+            if not self._reports:
+                return None
+            report = self._reports.pop()
+            if self._report_sequence > 0:
+                self._report_sequence -= 1
+        self.bus.publish(
+            Event.of(
+                "batch",
+                "batch",
+                "completion_report_withdrawn",
+                subject=report.mold_id,
+                press_id=report.press_id,
+                sequence=report.sequence,
+            )
+        )
+        return report
+
+    def return_assignment(self, assignment: "object", fleet: "object") -> None:
+        """把一次分配退回：从在机模具摘下并把任务重新放回队首。"""
+
+        press_id = getattr(assignment, "press_id")
+        unit = fleet.press(press_id)
+        if unit.mold_id == assignment.mold_id:
+            unit.abort_loaded_mold()
+        self.queue.push(
+            assignment.mold_id,
+            assignment.product_code,
+            assignment.thickness_mm,
+            assignment.assigned_at,
+            priority=100,
+        )
+        self.bus.publish(
+            Event.of(
+                "batch",
+                "batch",
+                "assignment_returned",
+                subject=assignment.mold_id,
+                press_id=press_id,
+            )
+        )
 
     def drain(self, drained_at: float) -> dict:
         """把队列清空并进入排空相位。"""

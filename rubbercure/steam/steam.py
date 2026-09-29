@@ -124,6 +124,29 @@ class SteamUnit:
 
         return close_steam(self, self._bus)
 
+    def abort_purge(self, mold_id: str) -> dict:
+        """撤回排气：收起排气凭据，相位退回空闲。"""
+
+        with self._lock:
+            self._purge_token = None
+            self.trap.close()
+            phase = self._state.rollback().value
+        self._bus.publish(
+            Event.of("steam", "steam", "purge_aborted", subject=mold_id, phase=phase)
+        )
+        return {"mold_id": mold_id, "phase": phase}
+
+    def abort_vent(self, mold_id: str) -> dict:
+        """撤回泄压：收起泄压凭据，相位退回泄压前的排气相位。"""
+
+        with self._lock:
+            self._vent_token = None
+            phase = self._state.rollback().value
+        self._bus.publish(
+            Event.of("steam", "steam", "vent_aborted", subject=mold_id, phase=phase)
+        )
+        return {"mold_id": mold_id, "phase": phase}
+
     def submit_setpoint(self, writer: str, target_kpa: float, priority: int) -> None:
         """由一个写入方提交压力目标值。"""
 

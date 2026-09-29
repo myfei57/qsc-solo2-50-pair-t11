@@ -112,6 +112,17 @@ class MoldRegistry:
             self._records[mold_id] = retired
         return retired
 
+    def withdraw_latest(self, mold_id: str) -> MoldRecord:
+        """撤回该模具最近一次登记（顺序闸门退回用），返回被撤回的记录。"""
+
+        with self._lock:
+            record = self._records.get(mold_id)
+            if record is None:
+                raise MoldError(f"模具 {mold_id} 未登记，无法撤回", component="mold")
+            withdrawn = record
+            del self._records[mold_id]
+        return withdrawn
+
     def active(self) -> list[MoldRecord]:
         with self._lock:
             records = list(self._records.values())

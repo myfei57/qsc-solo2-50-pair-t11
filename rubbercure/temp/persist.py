@@ -138,6 +138,31 @@ class TempPersister:
         assert confirmation is not None  # is_durable 已保证非空
         return confirmation
 
+    def revoke(self, mold_id: str) -> dict:
+        """顺序闸门撤回模温确认：删除落盘确认并清空内存。"""
+
+        with self._lock:
+            latest = self._latest
+            if latest is not None and latest.mold_id != mold_id:
+                raise InterlockError(
+                    f"模温确认属于 {latest.mold_id}，不能撤回 {mold_id} 的确认",
+                    component="temp",
+                )
+            removed = self._store.remove(STATE_KEY)
+            self._latest = None
+        self._bus.publish(
+            Event.of(
+                "temp",
+                "temp",
+                "temp_confirmation_revoked",
+                subject=STATE_KEY,
+                severity="warning",
+                mold_id=mold_id,
+                removed=bool(removed),
+            )
+        )
+        return {"mold_id": mold_id, "removed": bool(removed)}
+
     def restore(self) -> bool:
         """从磁盘恢复上次确认。"""
 

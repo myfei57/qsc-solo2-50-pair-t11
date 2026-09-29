@@ -69,6 +69,34 @@ class CoolingUnit:
 
         return drain_coolant(self, self._bus)
 
+    def abort_cooling(self, mold_id: str) -> dict:
+        """撤回冷却启动：停循环泵，相位退回待机。"""
+
+        flow = self.circulation.stop()
+        phase = self._state.rollback().value
+        self._bus.publish(
+            Event.of("cool", "cool", "cooling_start_aborted", subject=mold_id, phase=phase)
+        )
+        return {"mold_id": mold_id, "phase": phase, "flow_m3_h": round(flow, 3)}
+
+    def abort_drain(self) -> dict:
+        """撤回排空：相位退回循环（按规程重新建水循环）。"""
+
+        phase = self._state.rollback().value
+        self._bus.publish(
+            Event.of("cool", "cool", "drain_aborted", subject="coolant-loop", phase=phase)
+        )
+        return {"phase": phase}
+
+    def abort_stop(self) -> dict:
+        """撤回停冷却：相位退回排空完成，按退回方案重新停泵收尾。"""
+
+        phase = self._state.rollback().value
+        self._bus.publish(
+            Event.of("cool", "cool", "cool_stop_aborted", subject="coolant-loop", phase=phase)
+        )
+        return {"phase": phase}
+
     def snapshot(self) -> dict:
         with self._lock:
             mold_id = self._mold_id

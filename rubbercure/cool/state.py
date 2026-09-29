@@ -30,6 +30,13 @@ class CoolStateMachine:
         CoolPhase.STOPPED: (CoolPhase.IDLE,),
     }
 
+    # 顺序闸门撤回越序步时沿正常迁移边反向退一格。
+    _RECOVERY = {
+        CoolPhase.CIRCULATING: CoolPhase.IDLE,
+        CoolPhase.DRAINING: CoolPhase.CIRCULATING,
+        CoolPhase.STOPPED: CoolPhase.DRAINING,
+    }
+
     def __init__(self) -> None:
         self._phase = CoolPhase.IDLE
         self._history: list[CoolPhase] = [CoolPhase.IDLE]
@@ -44,6 +51,19 @@ class CoolStateMachine:
         if target not in self._ALLOWED[self._phase]:
             raise SequenceError(
                 f"冷却回路不允许从 {self._phase.value} 迁移到 {target.value}",
+                component=component,
+            )
+        self._phase = target
+        self._history.append(target)
+        return self._phase
+
+    def rollback(self, component: str = "cool") -> CoolPhase:
+        """沿正常迁移边反向退一格，供顺序闸门撤回越序步。"""
+
+        target = self._RECOVERY.get(self._phase)
+        if target is None:
+            raise SequenceError(
+                f"冷却回路相位 {self._phase.value} 没有可退回的上一相位",
                 component=component,
             )
         self._phase = target

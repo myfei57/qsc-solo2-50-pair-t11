@@ -8,10 +8,12 @@
 from __future__ import annotations
 
 from ..app import CycleInputs, Platform
-from ..errors import RubberCureError
+from ..errors import RubberCureError, SequenceError
 
 MAX_TREND_WINDOW_S = 86_400.0
 MAX_AUDIT_LIMIT = 500
+
+SEQUENCE_KINDS = ("cure", "openmold", "dispatch", "stop")
 
 
 class ConsoleAPI:
@@ -129,6 +131,69 @@ class ConsoleAPI:
             }
         except RubberCureError as error:
             return {"ok": False, "error": self.platform.note_error(error)}
+
+    def advance(self, payload: dict) -> dict:
+        """单步驱动一条工艺顺序：顺序不对当场拦住并返回退回方案。"""
+
+        kind = str(payload.get("kind", "cure"))
+        press_id = str(payload.get("press_id", "press-01"))
+        step = str(payload.get("step", ""))
+        if kind not in SEQUENCE_KINDS:
+            return {"ok": False, "error": {"type": "ValueError", "message": f"未知工艺顺序: {kind}"}}
+        if not step:
+            return {"ok": False, "error": {"type": "ValueError", "message": "缺少 step 参数"}}
+        try:
+            if kind == "cure":
+                result = self.platform.advance_cure(
+                    step,
+                    mold_id=str(payload.get("mold_id", "mold-01")),
+                    press_id=press_id,
+                    cavity_count=int(payload.get("cavity_count", 4)),
+                )
+            elif kind == "openmold":
+                result = self.platform.advance_open(step, press_id)
+            elif kind == "dispatch":
+                result = self.platform.advance_dispatch(step, press_id)
+            else:
+                result = self.platform.advance_stop(step, press_id)
+            return {"ok": True, "result": result}
+        except SequenceError as error:
+            return {"ok": False, "blocked": True, "error": self._blocked_error(kind, press_id, error)}
+        except RubberCureError as error:
+            return {"ok": False, "error": self.platform.note_error(error)}
+
+    def recover(self, payload: dict) -> dict:
+        """把被拦的顺序退回合规检查点，补齐缺失步后重试被拦动作。"""
+
+        kind = str(payload.get("kind", "cure"))
+        press_id = str(payload.get("press_id", "press-01"))
+        if kind not in SEQUENCE_KINDS:
+            return {"ok": False, "error": {"type": "ValueError", "message": f"未知工艺顺序: {kind}"}}
+        try:
+            return {"ok": True, "result": self.platform.recover_sequence(kind, press_id)}
+        except RubberCureError as error:
+            return {"ok": False, "error": self.platform.note_error(error)}
+
+    def blockage(self, payload: dict) -> dict:
+        """查询某台机某条顺序当前的拦截与退回方案。"""
+
+        kind = str(payload.get("kind", "cure"))
+        press_id = str(payload.get("press_id", "press-01"))
+        if kind not in SEQUENCE_KINDS:
+            return {"ok": False, "error": {"type": "ValueError", "message": f"未知工艺顺序: {kind}"}}
+        blockage = self.platform.sequence_blockage(kind, press_id)
+        return {"ok": True, "blocked": blockage is not None, "blockage": blockage}
+
+    def _blocked_error(self, kind: str, press_id: str, error: SequenceError) -> dict:
+        """拦截类异常：审计落盘（含退回方案）并带回控制台。"""
+
+        recorded = self.platform.note_error(error)
+        recorded["kind"] = kind
+        recorded["press_id"] = press_id
+        recovery = recorded.get("detail", {}).get("recovery")
+        if recovery:
+            recorded["recovery"] = recovery
+        return recorded
 
     def step(self, payload: dict) -> dict:
         """推进一个机群控制周期。"""
